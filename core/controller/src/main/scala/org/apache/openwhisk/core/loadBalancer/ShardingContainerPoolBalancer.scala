@@ -149,8 +149,8 @@ class ShardingContainerPoolBalancer(
   controllerInstance: ControllerInstanceId,
   feedFactory: FeedFactory,
   val invokerPoolFactory: InvokerPoolFactory,
-  implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])(
-  implicit actorSystem: ActorSystem,
+  implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])(implicit
+  actorSystem: ActorSystem,
   logging: Logging,
   materializer: ActorMaterializer)
     extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
@@ -254,8 +254,8 @@ class ShardingContainerPoolBalancer(
   override def clusterSize: Int = schedulingState.clusterSize
 
   /** 1. Publish a message to the loadbalancer */
-  override def publish(action: ExecutableWhiskActionMetaData, msg: ActivationMessage)(
-    implicit transid: TransactionId): Future[Future[Either[ActivationId, WhiskActivation]]] = {
+  override def publish(action: ExecutableWhiskActionMetaData, msg: ActivationMessage)(implicit
+    transid: TransactionId): Future[Future[Either[ActivationId, WhiskActivation]]] = {
 
     val isBlackboxInvocation = action.exec.pull
     val actionType = if (!isBlackboxInvocation) "managed" else "blackbox"
@@ -293,14 +293,17 @@ class ShardingContainerPoolBalancer(
       .map { invoker =>
         // MemoryLimit() and TimeLimit() return singletons - they should be fast enough to be used here
         val memoryLimit = action.limits.memory
-        val memoryLimitInfo = if (memoryLimit == MemoryLimit()) { "std" } else { "non-std" }
+        val memoryLimitInfo = if (memoryLimit == MemoryLimit()) { "std" }
+        else { "non-std" }
         val timeLimit = action.limits.timeout
-        val timeLimitInfo = if (timeLimit == TimeLimit()) { "std" } else { "non-std" }
+        val timeLimitInfo = if (timeLimit == TimeLimit()) { "std" }
+        else { "non-std" }
         logging.info(
           this,
           s"scheduled activation ${msg.activationId}, action '${msg.action.asString}' ($actionType), ns '${msg.user.namespace.name.asString}', mem limit ${memoryLimit.megabytes} MB (${memoryLimitInfo}), time limit ${timeLimit.duration.toMillis} ms (${timeLimitInfo}) to ${invoker}")
         val activationResult = setupActivation(msg, action, invoker)
-        sendActivationToInvoker(messageProducer, msg, invoker).map(_ => activationResult)
+        sendActivationToInvoker(messageProducer, msg, invoker, extractPriorityFromAction(action)).map(_ =>
+          activationResult)
       }
       .getOrElse {
         // report the state of all invokers
@@ -333,8 +336,8 @@ class ShardingContainerPoolBalancer(
 
 object ShardingContainerPoolBalancer extends LoadBalancerProvider {
 
-  override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(
-    implicit actorSystem: ActorSystem,
+  override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(implicit
+    actorSystem: ActorSystem,
     logging: Logging,
     materializer: ActorMaterializer): LoadBalancer = {
 
@@ -343,7 +346,11 @@ object ShardingContainerPoolBalancer extends LoadBalancerProvider {
         actorRefFactory: ActorRefFactory,
         messagingProvider: MessagingProvider,
         messagingProducer: MessageProducer,
-        sendActivationToInvoker: (MessageProducer, ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
+        sendActivationToInvoker: (
+          MessageProducer,
+          ActivationMessage,
+          InvokerInstanceId,
+          ActionPriority) => Future[RecordMetadata],
         monitor: Option[ActorRef]): ActorRef = {
 
         InvokerPool.prepare(instance, WhiskEntityStore.datastore())
@@ -351,7 +358,7 @@ object ShardingContainerPoolBalancer extends LoadBalancerProvider {
         actorRefFactory.actorOf(
           InvokerPool.props(
             (f, i) => f.actorOf(InvokerActor.props(i, instance)),
-            (m, i) => sendActivationToInvoker(messagingProducer, m, i),
+            (m, i, p) => sendActivationToInvoker(messagingProducer, m, i, p),
             messagingProvider.getConsumer(whiskConfig, s"health${instance.asString}", "health", maxPeek = 128),
             monitor))
       }
@@ -598,10 +605,11 @@ case class ClusterConfig(useClusterBootstrap: Boolean)
  * @param timeoutFactor factor to influence the timeout period for forced active acks (time-limit.std * timeoutFactor + timeoutAddon)
  * @param timeoutAddon extra time to influence the timeout period for forced active acks (time-limit.std * timeoutFactor + timeoutAddon)
  */
-case class ShardingContainerPoolBalancerConfig(managedFraction: Double,
-                                               blackboxFraction: Double,
-                                               timeoutFactor: Int,
-                                               timeoutAddon: FiniteDuration)
+case class ShardingContainerPoolBalancerConfig(
+  managedFraction: Double,
+  blackboxFraction: Double,
+  timeoutFactor: Int,
+  timeoutAddon: FiniteDuration)
 
 /**
  * State kept for each activation slot until completion.
@@ -617,13 +625,14 @@ case class ShardingContainerPoolBalancerConfig(managedFraction: Double,
  * @param isBlackbox true if the invoked action is a blackbox action, otherwise false (managed action)
  * @param isBlocking true if the action is invoked in a blocking fashion, i.e. "somebody" waits for the result
  */
-case class ActivationEntry(id: ActivationId,
-                           namespaceId: UUID,
-                           invokerName: InvokerInstanceId,
-                           memoryLimit: ByteSize,
-                           timeLimit: FiniteDuration,
-                           maxConcurrent: Int,
-                           fullyQualifiedEntityName: FullyQualifiedEntityName,
-                           timeoutHandler: Cancellable,
-                           isBlackbox: Boolean,
-                           isBlocking: Boolean)
+case class ActivationEntry(
+  id: ActivationId,
+  namespaceId: UUID,
+  invokerName: InvokerInstanceId,
+  memoryLimit: ByteSize,
+  timeLimit: FiniteDuration,
+  maxConcurrent: Int,
+  fullyQualifiedEntityName: FullyQualifiedEntityName,
+  timeoutHandler: Cancellable,
+  isBlackbox: Boolean,
+  isBlocking: Boolean)

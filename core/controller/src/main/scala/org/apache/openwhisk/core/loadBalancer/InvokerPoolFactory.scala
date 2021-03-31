@@ -24,12 +24,17 @@ import org.apache.openwhisk.core.connector.MessageProducer
 import org.apache.openwhisk.core.connector.MessagingProvider
 import org.apache.openwhisk.core.entity.InvokerInstanceId
 import scala.concurrent.Future
+import org.apache.openwhisk.core.entity.ActionPriority
 
 trait InvokerPoolFactory {
   def createInvokerPool(
     actorRefFactory: ActorRefFactory,
     messagingProvider: MessagingProvider,
     messagingProducer: MessageProducer,
-    sendActivationToInvoker: (MessageProducer, ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
+    sendActivationToInvoker: (
+      MessageProducer,
+      ActivationMessage,
+      InvokerInstanceId,
+      ActionPriority) => Future[RecordMetadata],
     monitor: Option[ActorRef]): ActorRef
 }

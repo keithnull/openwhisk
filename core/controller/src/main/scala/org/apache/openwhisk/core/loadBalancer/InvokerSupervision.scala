@@ -77,7 +77,7 @@ object InvocationFinishedResult {
   case object Timeout extends InvocationFinishedResult
 }
 
-case class ActivationRequest(msg: ActivationMessage, invoker: InvokerInstanceId)
+case class ActivationRequest(msg: ActivationMessage, invoker: InvokerInstanceId, priority: ActionPriority)
 case class InvocationFinishedMessage(invokerInstance: InvokerInstanceId, result: InvocationFinishedResult)
 
 // Sent to a monitor if the state changed
@@ -97,10 +97,11 @@ final case class InvokerInfo(buffer: RingBuffer[InvocationFinishedResult])
  * Note: An Invoker that never sends an initial Ping will not be considered
  * by the InvokerPool and thus might not be caught by monitoring.
  */
-class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef,
-                  sendActivationToInvoker: (ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
-                  pingConsumer: MessageConsumer,
-                  monitor: Option[ActorRef])
+class InvokerPool(
+  childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef,
+  sendActivationToInvoker: (ActivationMessage, InvokerInstanceId, ActionPriority) => Future[RecordMetadata],
+  pingConsumer: MessageConsumer,
+  monitor: Option[ActorRef])
     extends Actor {
 
   import InvokerState._
@@ -149,7 +150,7 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
       logStatus()
 
     // this is only used for the internal test action which enabled an invoker to become healthy again
-    case msg: ActivationRequest => sendActivationToInvoker(msg.msg, msg.invoker).pipeTo(sender)
+    case msg: ActivationRequest => sendActivationToInvoker(msg.msg, msg.invoker, msg.priority).pipeTo(sender)
   }
 
   def logStatus(): Unit = {
@@ -219,8 +220,8 @@ object InvokerPool {
       .flatMap { oldAction =>
         WhiskAction.put(db, action.revision(oldAction.rev), Some(oldAction))(tid, notifier = None)
       }
-      .recover {
-        case _: NoDocumentException => WhiskAction.put(db, action, old = None)(tid, notifier = None)
+      .recover { case _: NoDocumentException =>
+        WhiskAction.put(db, action, old = None)(tid, notifier = None)
       }
       .map(_ => {})
       .andThen {
@@ -251,10 +252,11 @@ object InvokerPool {
       }
   }
 
-  def props(f: (ActorRefFactory, InvokerInstanceId) => ActorRef,
-            p: (ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
-            pc: MessageConsumer,
-            m: Option[ActorRef] = None): Props = {
+  def props(
+    f: (ActorRefFactory, InvokerInstanceId) => ActorRef,
+    p: (ActivationMessage, InvokerInstanceId, ActionPriority) => Future[RecordMetadata],
+    pc: MessageConsumer,
+    m: Option[ActorRef] = None): Props = {
     Props(new InvokerPool(f, p, pc, m))
   }
 
@@ -304,8 +306,8 @@ class InvokerActor(invokerInstance: InvokerInstanceId, controllerInstance: Contr
   startWith(Unhealthy, InvokerInfo(new RingBuffer[InvocationFinishedResult](InvokerActor.bufferSize)))
 
   /** An Offline invoker represents an existing but broken invoker. This means, that it does not send pings anymore. */
-  when(Offline) {
-    case Event(_: PingMessage, _) => goto(Unhealthy)
+  when(Offline) { case Event(_: PingMessage, _) =>
+    goto(Unhealthy)
   }
 
   // To be used for all states that should send test actions to reverify the invoker
@@ -333,8 +335,8 @@ class InvokerActor(invokerInstance: InvokerInstanceId, controllerInstance: Contr
   }
 
   /** Handle the completion of an Activation in every state. */
-  whenUnhandled {
-    case Event(cm: InvocationFinishedMessage, info) => handleCompletionMessage(cm.result, info.buffer)
+  whenUnhandled { case Event(cm: InvocationFinishedMessage, info) =>
+    handleCompletionMessage(cm.result, info.buffer)
   }
 
   /** Logging on Transition change */
@@ -368,8 +370,9 @@ class InvokerActor(invokerInstance: InvokerInstanceId, controllerInstance: Contr
    * @param result: result of Activation
    * @param buffer to be used
    */
-  private def handleCompletionMessage(result: InvocationFinishedResult,
-                                      buffer: RingBuffer[InvocationFinishedResult]) = {
+  private def handleCompletionMessage(
+    result: InvocationFinishedResult,
+    buffer: RingBuffer[InvocationFinishedResult]) = {
     buffer.add(result)
 
     // If the action is successful it seems like the Invoker is Healthy again. So we execute immediately
@@ -418,8 +421,8 @@ class InvokerActor(invokerInstance: InvokerInstanceId, controllerInstance: Contr
         content = None,
         initArgs = Set.empty,
         lockedArgs = Map.empty)
-
-      context.parent ! ActivationRequest(activationMessage, invokerInstance)
+      // as this is a test action, simply set it to normal priority
+      context.parent ! ActivationRequest(activationMessage, invokerInstance, ActionPriority.Normal)
     }
   }
 

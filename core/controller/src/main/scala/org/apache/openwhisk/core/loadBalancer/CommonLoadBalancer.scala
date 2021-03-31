@@ -38,16 +38,19 @@ import scala.collection.concurrent.TrieMap
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.{Failure, Success}
+import spray.json.DefaultJsonProtocol._
 
 /**
  * Abstract class which provides common logic for all LoadBalancer implementations.
  */
-abstract class CommonLoadBalancer(config: WhiskConfig,
-                                  feedFactory: FeedFactory,
-                                  controllerInstance: ControllerInstanceId)(implicit val actorSystem: ActorSystem,
-                                                                            logging: Logging,
-                                                                            materializer: ActorMaterializer,
-                                                                            messagingProvider: MessagingProvider)
+abstract class CommonLoadBalancer(
+  config: WhiskConfig,
+  feedFactory: FeedFactory,
+  controllerInstance: ControllerInstanceId)(implicit
+  val actorSystem: ActorSystem,
+  logging: Logging,
+  materializer: ActorMaterializer,
+  messagingProvider: MessagingProvider)
     extends LoadBalancer {
 
   protected implicit val executionContext: ExecutionContext = actorSystem.dispatcher
@@ -113,9 +116,10 @@ abstract class CommonLoadBalancer(config: WhiskConfig,
    * the DB poll which is also trying to do the same.
    * Once the completion ack arrives, activationSlots entry will be removed.
    */
-  protected def setupActivation(msg: ActivationMessage,
-                                action: ExecutableWhiskActionMetaData,
-                                instance: InvokerInstanceId): Future[Either[ActivationId, WhiskActivation]] = {
+  protected def setupActivation(
+    msg: ActivationMessage,
+    action: ExecutableWhiskActionMetaData,
+    instance: InvokerInstanceId): Future[Either[ActivationId, WhiskActivation]] = {
 
     // Needed for emitting metrics.
     totalActivations.increment()
@@ -171,13 +175,20 @@ abstract class CommonLoadBalancer(config: WhiskConfig,
   protected val messageProducer =
     messagingProvider.getProducer(config, Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT))
 
+  protected def extractPriorityFromAction(action: ExecutableWhiskActionMetaData): ActionPriority = {
+    val priorityStr = action.annotations.getAs[String](Annotations.ActionPriority).getOrElse("")
+    ActionPriority.fromString(priorityStr)
+  }
+
   /** 3. Send the activation to the invoker */
-  protected def sendActivationToInvoker(producer: MessageProducer,
-                                        msg: ActivationMessage,
-                                        invoker: InvokerInstanceId): Future[RecordMetadata] = {
+  protected def sendActivationToInvoker(
+    producer: MessageProducer,
+    msg: ActivationMessage,
+    invoker: InvokerInstanceId,
+    priority: ActionPriority): Future[RecordMetadata] = {
     implicit val transid: TransactionId = msg.transid
 
-    val topic = s"invoker${invoker.toInt}"
+    val topic = s"invoker${invoker.toInt}-${priority.toString}"
 
     MetricEmitter.emitCounterMetric(LoggingMarkers.LOADBALANCER_ACTIVATION_START)
     val start = transid.started(
@@ -232,9 +243,10 @@ abstract class CommonLoadBalancer(config: WhiskConfig,
   }
 
   /** 5. Process the result ack and return it to the user */
-  protected def processResult(aid: ActivationId,
-                              tid: TransactionId,
-                              response: Either[ActivationId, WhiskActivation]): Unit = {
+  protected def processResult(
+    aid: ActivationId,
+    tid: TransactionId,
+    response: Either[ActivationId, WhiskActivation]): Unit = {
     // Resolve the promise to send the result back to the user.
     // The activation will be removed from the activation slots later, when the completion message
     // is received (because the slot in the invoker is not yet free for new activations).
@@ -257,11 +269,12 @@ abstract class CommonLoadBalancer(config: WhiskConfig,
     LoggingMarkers.LOADBALANCER_COMPLETION_ACK(controllerInstance, ForcedAfterRegularCompletionAck)
 
   /** 6. Process the completion ack and update the state */
-  protected[loadBalancer] def processCompletion(aid: ActivationId,
-                                                tid: TransactionId,
-                                                forced: Boolean,
-                                                isSystemError: Boolean,
-                                                instance: InstanceId): Unit = {
+  protected[loadBalancer] def processCompletion(
+    aid: ActivationId,
+    tid: TransactionId,
+    forced: Boolean,
+    isSystemError: Boolean,
+    instance: InstanceId): Unit = {
 
     val invoker = instance match {
       case i: InvokerInstanceId => Some(i)
