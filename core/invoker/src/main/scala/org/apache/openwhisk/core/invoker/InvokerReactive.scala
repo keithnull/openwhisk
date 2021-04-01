@@ -62,7 +62,8 @@ class InvokerReactive(
   producer: MessageProducer,
   poolConfig: ContainerPoolConfig = loadConfigOrThrow[ContainerPoolConfig](ConfigKeys.containerPool),
   limitsConfig: ConcurrencyLimitConfig = loadConfigOrThrow[ConcurrencyLimitConfig](ConfigKeys.concurrencyLimit))(
-  implicit actorSystem: ActorSystem,
+  implicit
+  actorSystem: ActorSystem,
   logging: Logging)
     extends InvokerCore {
 
@@ -118,20 +119,35 @@ class InvokerReactive(
   }
 
   /** Initialize message consumers */
-  private val topic = s"invoker${instance.toInt}"
+  private val priorities: Seq[ActionPriority] = Seq(ActionPriority.High, ActionPriority.Normal, ActionPriority.Low)
+
+  private val topicPrefix = s"invoker${instance.toInt}"
+  private val topics = priorities.map(p => s"${topicPrefix}-${p.toString}")
+
   private val maximumContainers = (poolConfig.userMemory / MemoryLimit.MIN_MEMORY).toInt
   private val msgProvider = SpiLoader.get[MessagingProvider]
 
   //number of peeked messages - increasing the concurrentPeekFactor improves concurrent usage, but adds risk for message loss in case of crash
   private val maxPeek =
     math.max(maximumContainers, (maximumContainers * limitsConfig.max * poolConfig.concurrentPeekFactor).toInt)
+  private val maxPeekFactors = Seq(1.0, 0.5, 0.25) // set the peek factors for different priorities
 
-  private val consumer =
-    msgProvider.getConsumer(config, topic, topic, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
+  private val consumers =
+    topics.zip(maxPeekFactors).map { case (t, factor) =>
+      msgProvider
+        .getConsumer(config, t, t, (factor * maxPeek).ceil.toInt, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
+    }
 
-  private val activationFeed = actorSystem.actorOf(Props {
-    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage)
-  })
+  private val activationFeeds = consumers
+    .zip(priorities)
+    .map { case (consumer, priority) =>
+      (
+        priority,
+        actorSystem.actorOf(Props {
+          new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage(priority))
+        }))
+    }
+    .toMap
 
   private val ack = {
     val sender = if (UserEvents.enabled) Some(new UserEventSender(producer)) else None
@@ -153,18 +169,22 @@ class InvokerReactive(
         .props(containerFactory.createContainer, ack, store, collectLogs, instance, poolConfig))
 
   val prewarmingConfigs: List[PrewarmingConfig] = {
-    ExecManifest.runtimesManifest.stemcells.flatMap {
-      case (mf, cells) =>
-        cells.map { cell =>
-          PrewarmingConfig(cell.initialCount, new CodeExecAsString(mf, "", None), cell.memory, cell.reactive)
-        }
+    ExecManifest.runtimesManifest.stemcells.flatMap { case (mf, cells) =>
+      cells.map { cell =>
+        PrewarmingConfig(cell.initialCount, new CodeExecAsString(mf, "", None), cell.memory, cell.reactive)
+      }
     }.toList
   }
 
+  // TODO: how to pass feed to ContainerPool correctly?
+  // In usual cases, this doesn't matter at all, but for exceptions, this might be an issue
   private val pool =
-    actorSystem.actorOf(ContainerPool.props(childFactory, poolConfig, activationFeed, prewarmingConfigs))
+    actorSystem.actorOf(
+      ContainerPool.props(childFactory, poolConfig, activationFeeds(ActionPriority.Normal), prewarmingConfigs))
 
-  def handleActivationMessage(msg: ActivationMessage)(implicit transid: TransactionId): Future[Unit] = {
+  def handleActivationMessage(msg: ActivationMessage, priority: ActionPriority)(implicit
+    transid: TransactionId): Future[Unit] = {
+    logging.info(this, s"[PRIORITY] handleActivationMessage($priority) for activation ${msg.activationId}")
     val namespace = msg.action.path
     val name = msg.action.name
     val actionid = FullyQualifiedEntityName(namespace, name).toDocId.asDocInfo(msg.revision)
@@ -193,7 +213,7 @@ class InvokerReactive(
         case DocumentRevisionMismatchException(_) =>
           // if revision is mismatched, the action may have been updated,
           // so try again with the latest code
-          handleActivationMessage(msg.copy(revision = DocRevision.empty))
+          handleActivationMessage(msg.copy(revision = DocRevision.empty), priority)
         case t =>
           val response = t match {
             case _: NoDocumentException =>
@@ -203,8 +223,7 @@ class InvokerReactive(
             case _ =>
               ActivationResponse.whiskError(Messages.actionFetchErrorWhileInvoking)
           }
-          activationFeed ! MessageFeed.Processed
-
+          activationFeeds(priority) ! MessageFeed.Processed
           val activation = generateFallbackActivation(msg, response)
           ack(
             msg.transid,
@@ -220,7 +239,8 @@ class InvokerReactive(
   }
 
   /** Is called when an ActivationMessage is read from Kafka */
-  def processActivationMessage(bytes: Array[Byte]): Future[Unit] = {
+  def processActivationMessage(priority: ActionPriority)(bytes: Array[Byte]): Future[Unit] = {
+    logging.info(this, s"[PRIORITY] processActivationMessage(${priority}) gets an activation")
     Future(ActivationMessage.parse(new String(bytes, StandardCharsets.UTF_8)))
       .flatMap(Future.fromTry)
       .flatMap { msg =>
@@ -234,11 +254,11 @@ class InvokerReactive(
 
         if (!namespaceBlacklist.isBlacklisted(msg.user)) {
           val start = transid.started(this, LoggingMarkers.INVOKER_ACTIVATION, logLevel = InfoLevel)
-          handleActivationMessage(msg)
+          handleActivationMessage(msg, priority)
         } else {
           // Iff the current namespace is blacklisted, an active-ack is only produced to keep the loadbalancer protocol
           // Due to the protective nature of the blacklist, a database entry is not written.
-          activationFeed ! MessageFeed.Processed
+          activationFeeds(priority) ! MessageFeed.Processed
 
           val activation =
             generateFallbackActivation(msg, ActivationResponse.applicationError(Messages.namespacesBlacklisted))
@@ -254,13 +274,12 @@ class InvokerReactive(
           Future.successful(())
         }
       }
-      .recoverWith {
-        case t =>
-          // Iff everything above failed, we have a terminal error at hand. Either the message failed
-          // to deserialize, or something threw an error where it is not expected to throw.
-          activationFeed ! MessageFeed.Processed
-          logging.error(this, s"terminal failure while processing message: $t")
-          Future.successful(())
+      .recoverWith { case t =>
+        // Iff everything above failed, we have a terminal error at hand. Either the message failed
+        // to deserialize, or something threw an error where it is not expected to throw.
+        activationFeeds(priority) ! MessageFeed.Processed
+        logging.error(this, s"terminal failure while processing message: $t")
+        Future.successful(())
       }
   }
 
@@ -294,8 +313,8 @@ class InvokerReactive(
 
   private val healthProducer = msgProvider.getProducer(config)
   Scheduler.scheduleWaitAtMost(1.seconds)(() => {
-    healthProducer.send("health", PingMessage(instance)).andThen {
-      case Failure(t) => logging.error(this, s"failed to ping the controller: $t")
+    healthProducer.send("health", PingMessage(instance)).andThen { case Failure(t) =>
+      logging.error(this, s"failed to ping the controller: $t")
     }
   })
 
