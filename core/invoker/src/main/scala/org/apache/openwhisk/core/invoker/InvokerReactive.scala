@@ -144,7 +144,13 @@ class InvokerReactive(
       (
         priority,
         actorSystem.actorOf(Props {
-          new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage(priority))
+          new MessageFeed(
+            s"activationFeed($priority)",
+            logging,
+            consumer,
+            maxPeek,
+            1.second,
+            processActivationMessage(priority))
         }))
     }
     .toMap
@@ -176,11 +182,8 @@ class InvokerReactive(
     }.toList
   }
 
-  // TODO: how to pass feed to ContainerPool correctly?
-  // In usual cases, this doesn't matter at all, but for exceptions, this might be an issue
   private val pool =
-    actorSystem.actorOf(
-      ContainerPool.props(childFactory, poolConfig, activationFeeds(ActionPriority.Normal), prewarmingConfigs))
+    actorSystem.actorOf(ContainerPool.props(childFactory, poolConfig, activationFeeds, prewarmingConfigs))
 
   def handleActivationMessage(msg: ActivationMessage, priority: ActionPriority)(implicit
     transid: TransactionId): Future[Unit] = {
@@ -202,7 +205,7 @@ class InvokerReactive(
       .flatMap(action => {
         action.toExecutableWhiskAction match {
           case Some(executable) =>
-            pool ! Run(executable, msg)
+            pool ! Run(executable, msg, priority = priority)
             Future.successful(())
           case None =>
             logging.error(this, s"non-executable action reached the invoker ${action.fullyQualifiedName(false)}")
