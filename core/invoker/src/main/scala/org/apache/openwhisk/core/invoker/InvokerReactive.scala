@@ -118,7 +118,11 @@ class InvokerReactive(
   }
 
   /** Initialize message consumers */
-  private val topic = s"invoker${instance.toInt}"
+  private val priorities: Seq[ActionPriority] = Seq(ActionPriority.High, ActionPriority.Normal, ActionPriority.Low)
+
+  private val topicPrefix = s"invoker${instance.toInt}"
+  private val topics = priorities.map(p => s"${topicPrefix}-$p")
+
   private val maximumContainers = (poolConfig.userMemory / MemoryLimit.MIN_MEMORY).toInt
   private val msgProvider = SpiLoader.get[MessagingProvider]
 
@@ -126,11 +130,17 @@ class InvokerReactive(
   private val maxPeek =
     math.max(maximumContainers, (maximumContainers * limitsConfig.max * poolConfig.concurrentPeekFactor).toInt)
 
-  private val consumer =
-    msgProvider.getConsumer(config, topic, topic, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
+  private val consumers = priorities.zip(topics.map(t =>
+    msgProvider.getConsumer(config, t, t, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)))
 
   private val activationFeed = actorSystem.actorOf(Props {
-    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage)
+    new AggregatedMessageFeed(
+      "actionvation-with-priority",
+      logging,
+      consumers,
+      maxPeek,
+      1.second,
+      processActivationMessage)
   })
 
   private val ack = {
