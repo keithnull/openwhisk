@@ -1,24 +1,16 @@
 import requests
 from requests.auth import HTTPBasicAuth
-from collections import namedtuple
 import json
 import re
 import time
 
-API_HOST = "http://localhost:3233"
-ENDPOINT = f"{API_HOST}/api/v1/namespaces/guest/activations?limit=200&docs=True"
-USER = "23bc46b1-71f6-4ed5-8c54-816aa4f8c502"
-PASSWORD = "123zO3xZCLrMN6v2BKK1dXYFpXlPkccOFqm12CdAsMgRU4VrNZ9lyGVCGuMDGIwP"
+from data_store import Activation, ActivationStore
+from wsk_config import USER, PASSWORD, ACTIVATIONS_ENDPOINT, ACTIVATIONS_PARAMS, DB_FILENAME
 
 POLL_INTERVAL = 5.0  # s
 SUCCESSIVE_FAILURES = 6
 
 RESULT_PATTERN = re.compile('Sleeping\\s+(\\d+)ms\\.')
-
-Activation = namedtuple(
-    "Activation", ["id", "priority", "name", "start",
-                   "end", "duration", "execution_time"]
-)
 
 seen = set()
 all_activations = list()
@@ -48,7 +40,8 @@ def fetch():
         all_activations.append(res)
         return True
 
-    req = requests.get(ENDPOINT, auth=HTTPBasicAuth(USER, PASSWORD))
+    req = requests.get(ACTIVATIONS_ENDPOINT, params=ACTIVATIONS_PARAMS,
+                       auth=HTTPBasicAuth(USER, PASSWORD))
     print(req.status_code)
     if req.status_code != 200:
         return False
@@ -67,3 +60,5 @@ if __name__ == "__main__":
     print("-" * 40)
     for record in all_activations:
         print(record)
+    db = ActivationStore(DB_FILENAME)
+    db.update_activation(all_activations)

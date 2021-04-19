@@ -1,13 +1,28 @@
-import os
 import random
 import argparse
 import time
+from datetime import datetime
+import json
+import requests
+from data_store import ActivationStore
+from wsk_config import USER, PASSWORD, INVOKE_ENDPOINT, INVOKE_PARAMS, DB_FILENAME
+
+
+db = ActivationStore(DB_FILENAME)
 
 
 def invoke_action(name, priority, params=None):
-    params_str = "-p " + \
-        " ".join(f"{k} {v}" for k, v in params.items()) if params else ""
-    os.system(f"wsk action invoke {name}-{priority} {params_str}")
+    resp = requests.post(INVOKE_ENDPOINT + f"{name}-{priority}",
+                         json=params, params=INVOKE_PARAMS,
+                         auth=(USER, PASSWORD))
+    if resp.status_code not in (202, 200):
+        print(resp.url, resp.status_code)
+        return False
+    res = json.loads(resp.content)
+    created_at = time.time()
+    print(datetime.now(), name, priority, res["activationId"])
+    db.create_activation([res["activationId"]], [created_at, ])
+    return True
 
 
 def invoke(name, priority_dist, interval, shuffle, min_duration, max_duration):
@@ -28,7 +43,7 @@ if __name__ == "__main__":
         "Run multiple OpenWhisk actions via wsk-cli")
     parse.add_argument("--low", type=int, default=0, action="store",
                        help="The number of low priority actions (default: 0)")
-    parse.add_argument("--normal",  type=int, default=0, action="store",
+    parse.add_argument("--normal", type=int, default=0, action="store",
                        help="The number of normal priority actions (default: 0)")
     parse.add_argument("--high", type=int, default=0, action="store",
                        help="The number of high priority actions (default: 0)")
