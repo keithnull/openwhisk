@@ -135,7 +135,7 @@ class InvokerReactive(
 
   private val activationFeed = actorSystem.actorOf(Props {
     new AggregatedMessageFeed(
-      "actionvation-with-priority",
+      "activation-with-priority",
       logging,
       consumers,
       maxPeek,
