@@ -140,11 +140,12 @@ class AggregatedMessageFeed(
           val records = consumersWithPriority.foldLeft(Seq.empty[QueueItem])((acc, cp) => {
             if (acc.size > 0) { // stop further collecting records
               acc
-            }
-            val (priority, consumer) = cp
-            acc ++ consumer.peek(longPollDuration).map {
-              // just prepend its priority here
-              case (topic, partition, offset, bytes) => (priority, topic, partition, offset, bytes)
+            } else {
+              val (priority, consumer) = cp
+              acc ++ consumer.peek(longPollDuration).map {
+                // just prepend its priority here
+                case (topic, partition, offset, bytes) => (priority, topic, partition, offset, bytes)
+              }
             }
           })
           FillCompleted(records)
