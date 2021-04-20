@@ -1,2 +1,8 @@
 -- SQLite
-SELECT priority, COUNT(*), SUM(started_at - created_at * 1000) / COUNT(*) FROM activations GROUP BY priority;
+SELECT
+    priority,
+    COUNT(*) AS activations_cnt,
+    SUM(started_at - created_at) / COUNT(*) AS average_delay_in_ms
+FROM activations
+GROUP BY priority
+ORDER BY average_delay_in_ms;
