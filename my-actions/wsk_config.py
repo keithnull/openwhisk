@@ -1,6 +1,6 @@
 # this file contains OpenWhisk config
 
-API_HOST = "http://localhost:3233"
+API_HOST = "http://127.0.0.1:3233"
 NAMESPACE = "guest"
 ACTIVATIONS_ENDPOINT = f"{API_HOST}/api/v1/namespaces/{NAMESPACE}/activations"
 ACTIVATIONS_PARAMS = {"limit": 200, "docs": True}

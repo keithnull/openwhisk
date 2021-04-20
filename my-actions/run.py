@@ -19,7 +19,7 @@ def invoke_action(name, priority, params=None):
         print(resp.url, resp.status_code)
         return False
     res = json.loads(resp.content)
-    created_at = time.time()
+    created_at = int(time.time() * 1000)
     print(datetime.now(), name, priority, res["activationId"])
     db.create_activation([res["activationId"]], [created_at, ])
     return True
@@ -33,6 +33,7 @@ def invoke(name, priority_dist, interval, shuffle, min_duration, max_duration):
         random.shuffle(invocations)
     for i, p in enumerate(invocations):
         duration = random.randint(min_duration, max_duration)
+        print(f"{i:03d}/{len(invocations):03d}:", end=" ")
         invoke_action(name, p, {"ms": duration})
         if i != len(invocations) - 1:
             time.sleep(interval)
