@@ -29,7 +29,7 @@ object AggregatedMessageFeed {
   /** Indicates the consumer is ready to accept messages from the message bus for processing. */
   object Ready
 
-  val maxAgePerLevel = 30
+  val maxAgePerLevel = 30000
   // (priority, topic, enqueueTime ,partition, offset, bytes, age)
   type QueueItem = (ActionPriority, String, time.LocalTime, Int, Long, Array[Byte], Int)
 
@@ -129,7 +129,7 @@ class AggregatedMessageFeed(
         blocking {
           val records = consumersWithPriority.foldLeft(Seq.empty[QueueItem])((acc, cp) => {
             val (priority, consumer) = cp
-            if (!shouldFillSingleQueue(priority)) {
+            if (acc.size > 0 || !shouldFillSingleQueue(priority)) {
               acc
             } else {
               acc ++ consumer.peek(longPollDuration).map {
