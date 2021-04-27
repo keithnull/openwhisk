@@ -176,24 +176,65 @@ abstract class CommonLoadBalancer(
   protected val messageProducer =
     messagingProvider.getProducer(config, Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT))
 
+  // parameters for moving averages
+  protected val alpha = 0.1
+  protected val inferThreshold = 20
+  // moving averages used for inference
+  protected var inferenceCnt = 0
+  protected var timeoutAverage = 0.0 // ms
+  protected var memAverage = 0.0 // MB
+
   protected def extractPriorityFromAction(action: ExecutableWhiskActionMetaData): ActionPriority = {
 
     def inferPriorityFromAction(): ActionPriority = {
       logging.debug(this, s"no priority set for ${action.name}, now try to infer it")
-      // check timeout
 
-      val res = if (action.limits.timeout.duration < 1.minute) {
-        ActionPriority.High
-      } else if (action.limits.timeout.duration > 4.minute) {
-        ActionPriority.Low
-      } else {
-        // check memory
-        if (action.limits.memory.megabytes <= 200) {
+      def staticInfer() = {
+        logging.debug(this, s"static inference for ${action.name}")
+        // check timeout, as the default timeout is 1 minute,
+        // this can be viewed as replacing timeoutAverage with 1.minute in dynamicInfer()
+        if (action.limits.timeout.duration <= 1.minute * 0.8) {
           ActionPriority.High
+        } else if (action.limits.timeout.duration >= 1.minute * 2) {
+          ActionPriority.Low
         } else {
-          ActionPriority.Normal
+          // check memory, also the default memory limit is 256MB
+          if (action.limits.memory.megabytes <= 256 * 0.8) {
+            ActionPriority.High
+          } else {
+            ActionPriority.Normal
+          }
         }
       }
+
+      def dynamicInfer() = {
+        logging.debug(this, s"dynamic inference for ${action.name}")
+        if (action.limits.timeout.duration.toMillis <= 0.8 * timeoutAverage) {
+          ActionPriority.High
+        } else if (action.limits.timeout.duration.toMillis >= 2 * timeoutAverage) {
+          ActionPriority.Low
+        } else {
+          if (action.limits.memory.megabytes <= 0.8 * memAverage) {
+            ActionPriority.High
+          } else {
+            ActionPriority.Normal
+          }
+        }
+      }
+      // update moving average of these metrics
+      def updateAverage() = {
+        if (inferenceCnt == 0) {
+          timeoutAverage = action.limits.timeout.duration.toMillis
+          memAverage = action.limits.memory.megabytes
+        } else {
+          timeoutAverage = alpha * action.limits.timeout.duration.toMillis + (1 - alpha) * timeoutAverage
+          memAverage = alpha * action.limits.memory.megabytes + (1 - alpha) * memAverage
+        }
+        inferenceCnt += 1
+      }
+
+      val res = if (inferenceCnt >= inferThreshold) dynamicInfer() else staticInfer()
+      updateAverage()
       logging.debug(this, s"okay, it's inferred to be $res")
       res
     }
