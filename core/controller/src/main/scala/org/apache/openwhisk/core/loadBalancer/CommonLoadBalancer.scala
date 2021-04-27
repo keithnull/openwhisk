@@ -46,7 +46,8 @@ import spray.json.DefaultJsonProtocol._
 abstract class CommonLoadBalancer(
   config: WhiskConfig,
   feedFactory: FeedFactory,
-  controllerInstance: ControllerInstanceId)(implicit
+  controllerInstance: ControllerInstanceId)(
+  implicit
   val actorSystem: ActorSystem,
   logging: Logging,
   materializer: ActorMaterializer,
@@ -176,8 +177,35 @@ abstract class CommonLoadBalancer(
     messagingProvider.getProducer(config, Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT))
 
   protected def extractPriorityFromAction(action: ExecutableWhiskActionMetaData): ActionPriority = {
-    val priorityStr = action.annotations.getAs[String](Annotations.ActionPriority).getOrElse("")
-    ActionPriority.fromString(priorityStr)
+
+    def inferPriorityFromAction(): ActionPriority = {
+      logging.debug(this, s"no priority set for ${action.name}, now try to infer it")
+      // check timeout
+
+      val res = if (action.limits.timeout.duration < 1.minute) {
+        ActionPriority.High
+      } else if (action.limits.timeout.duration > 4.minute) {
+        ActionPriority.Low
+      } else {
+        // check memory
+        if (action.limits.memory.megabytes <= 200) {
+          ActionPriority.High
+        } else {
+          ActionPriority.Normal
+        }
+      }
+      logging.debug(this, s"okay, it's inferred to be $res")
+      res
+    }
+
+    val priorityStr = action.annotations.getAs[String](Annotations.ActionPriority)
+    priorityStr match {
+      case Success(value) => ActionPriority.fromString(value)
+      case Failure(_) => {
+        // if the user doesn't set its priority, we need to infer it
+        inferPriorityFromAction()
+      }
+    }
   }
 
   /** 3. Send the activation to the invoker */
