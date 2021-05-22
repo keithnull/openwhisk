@@ -129,7 +129,7 @@ class AggregatedMessageFeed(
         blocking {
           val records = consumersWithPriority.foldLeft(Seq.empty[QueueItem])((acc, cp) => {
             val (priority, consumer) = cp
-            if (acc.size > 0 || !shouldFillSingleQueue(priority)) {
+            if (!shouldFillSingleQueue(priority)) {
               acc
             } else {
               acc ++ consumer.peek(longPollDuration).map {

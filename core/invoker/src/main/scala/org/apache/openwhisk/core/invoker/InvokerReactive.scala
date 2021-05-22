@@ -139,7 +139,7 @@ class InvokerReactive(
       logging,
       consumers,
       maxPeek,
-      1.second,
+      10.millisecond,
       processActivationMessage)
   })
 
